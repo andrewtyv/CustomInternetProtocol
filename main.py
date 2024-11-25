@@ -3,6 +3,7 @@ import struct
 import random
 import threading
 import tkinter as tk
+from time import sleep
 from tkinter import filedialog, scrolledtext, messagebox
 import os
 import time
@@ -24,7 +25,7 @@ class Packet:
             packet += struct.pack('!H', self.data_length)
 
 
-        packet += self.data  # Додаємо дані
+        packet += self.data
 
         self.checksum = self.calculate_checksum(packet)
         packet += struct.pack('!H', self.checksum)
@@ -121,7 +122,7 @@ class ChatApp:
             self.is_connected = True
             self.last_activity_time = time.time()
 
-            self.fragment_size = tk.IntVar(value=512)
+            self.fragment_size = tk.IntVar(value=1400)
 
             self.file_Packets_received = []
 
@@ -129,6 +130,8 @@ class ChatApp:
 
             self.file_received = False
 
+            self.corrupt_a_packet = True
+            self.total_num_of_fragments_received =0
             tk.Label(root, text="Fragment size (bytes):").grid(row=1, column=2, padx=10, pady=5, sticky="e")
             self.fragment_entry = tk.Entry(root, textvariable=self.fragment_size, width=10)
             self.fragment_entry.grid(row=1, column=3, padx=10, pady=5, sticky="w")
@@ -166,7 +169,7 @@ class ChatApp:
 
         def send_keep_alive(self, ask =0 ):
             print("send keep alive")
-            keep_alive_packet = self.create_packet(5, seq_num=1, ask=ask)
+            keep_alive_packet = self.create_packet(5, seq_num=2, ask=ask)
             self.sock.sendto(keep_alive_packet.pack(), self.target_addr)
 
         def terminate_program(self):
@@ -187,16 +190,19 @@ class ChatApp:
                 return
 
             try:
-                fragment_size = self.fragment_size.get() if self.fragment_entry.get() else 512
-                if fragment_size <= 0:
-                    raise ValueError("Fragment size must be greater than 0")
+                fragment_size = self.fragment_size.get() if self.fragment_entry.get() else 1400
+                if fragment_size <= 0 or fragment_size>1500:
+                    raise ValueError("Fragment size must be greater than 0 and less than 1500")
             except ValueError as e:
                 messagebox.showerror("Invalid Fragment Size", str(e))
                 return
 
             file_size = os.path.getsize(self.file_path)
+            self.chat_window.insert(tk.END, f"path to file sending:  {self.file_path}\n")
             num_fragments = (file_size + fragment_size - 1) // fragment_size
+            self.chat_window.insert(tk.END, f"number of fragments to send {num_fragments}\n")
             file_name = os.path.basename(self.file_path)
+            num =0
             with open(self.file_path, 'rb') as f:
                 for i in range(num_fragments):
                     fragment_data = f.read(fragment_size)
@@ -210,8 +216,13 @@ class ChatApp:
                     )
                     self.sent_packets[packet.seq_num] = packet
                     self.sock.sendto(packet.pack(), self.target_addr)
-                    self.chat_window.insert(tk.END, f"Sent fragment {i + 1}/{num_fragments} of {file_name}\n")
+
+                    self.chat_window.insert(tk.END, f"Sent fragment {i + 1}/{num_fragments} of {file_name} with len {len(packet.data)}\n\n")
                     self.last_activity_time =time.time()
+                    num+=1
+                    if num == 4:
+                        sleep(0.09)
+                        num =0
                     Packet.generated_seq_num += 1
 
             end_packet = Packet(
@@ -234,18 +245,11 @@ class ChatApp:
             three_way_handshake(self.sock, target_addr, is_server)
 
             threading.Thread(target=self.receive_messages, args=(self.sock,)).start()
-            threading.Thread(target=self.selective_repeat()).start()
 
-        def selective_repeat(self):
-            while True:
-                if len(self.sent_packets) < 4:
-                    break
-
-                for packet in self.sent_packets:
-                    time.sleep(0.1)
 
         def send_text(self):
             message = self.message_entry.get()
+
             if (message):
                 packet = Packet(
                     seq_num=Packet.generated_seq_num,
@@ -256,7 +260,12 @@ class ChatApp:
                     data=message.encode()
                 )
                 self.sent_packets[packet.seq_num] = packet
-                self.sock.sendto(packet.pack(), self.target_addr)
+                packet_to_send = packet.pack()
+                if self.corrupt_a_packet:
+                    packet_to_send=bytearray(packet_to_send)
+                    packet_to_send[10]= 0xFF
+                    self.corrupt_a_packet = False
+                self.sock.sendto(packet_to_send, self.target_addr)
                 self.chat_window.insert(tk.END, f"Sent: {message}\n")
                 self.message_entry.delete(0, tk.END)
                 Packet.generated_seq_num += 1
@@ -276,9 +285,10 @@ class ChatApp:
 
         def receive_messages(self, sock):
             while True:
-                data, addr = self.sock.recvfrom(560)
+                data, addr = self.sock.recvfrom(1500)
                 packet = Packet.unpack(data)
                 self.last_activity_time = time.time()
+
                 if packet.verify_checksum():
                     if packet.msg_type == 1:
                         message = packet.data.decode()
@@ -294,16 +304,21 @@ class ChatApp:
 
                     elif packet.msg_type == 2:
                         self.file_received = False
+                        self.total_num_of_fragments_received+=1
                         self.file_Packets_received.append(packet)
-                        self.chat_window.insert(tk.END, f"Received file fragment, sequence number: {packet.seq_num}\n")
+                        self.chat_window.insert(tk.END, f"Received file fragment, sequence number: {packet.seq_num}\n with len: {len(packet.data)}\n")
 
                     elif packet.msg_type == 6:
                         print("im here")
                         self.save_received_file()
                         self.file_Packets_received.clear()
+                        self.chat_window.insert(tk.END, f"total num of fragments received: {self.total_num_of_fragments_received}\n")
+                        self.chat_window.insert(tk.END, f"Received last file fragment, sequence number: {packet.seq_num} with len: {len(packet.data)}\n")
+                        self.total_num_of_fragments_received =0
 
                     if packet.msg_type == 3 and packet.ack == 1:
-                        if packet.seq_num in self.sent_packets:
+                       if packet.seq_num in self.sent_packets:
+                            print("deleting")
                             del self.sent_packets[packet.seq_num]
                             print(f"ACK received for packet {packet.seq_num}")
 
@@ -311,7 +326,7 @@ class ChatApp:
                         packet_to_resent =self.sent_packets[packet.seq_num]
                         self.sock.sendto(packet_to_resent.pack(), self.target_addr)
 
-                    if packet.msg_type != 3:
+                    if packet.msg_type != 3 and packet.msg_type !=5:
                         self.packets_received[packet.seq_num] = self.create_packet(3, packet.seq_num , 1)
                     if packet.msg_type ==5:
                         print("keep_alive_here")
@@ -324,11 +339,15 @@ class ChatApp:
                             self.missed_keep_alive =0
                     self.last_activity_time = time.time()
                 else:
+                    self.chat_window.insert(tk.END,f"corrupted packet was received\n")
                     self.packets_received[packet.seq_num] = self.create_packet(3, packet.seq_num, 0)
-                    print("checksum not verifyed, errors in text")
+                    print("checksum not verified, errors in text")
                     self.last_activity_time = time.time()
                 if len(self.packets_received) >= self.windowsize:
+                    print("sending acks")
                     for seq_num, packet1 in list(self.packets_received.items()):
+                        print(seq_num)
+                        print("\n")
                         self.sock.sendto(packet1.pack(), self.target_addr)
                         self.last_activity_time = time.time()
                     self.packets_received.clear()
