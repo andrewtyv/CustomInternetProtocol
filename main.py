@@ -121,7 +121,7 @@ class ChatApp:
             self.keep_alive_missed_limit = 3
             self.is_connected = True
             self.last_activity_time = time.time()
-
+            self.start_sending_file= time.time()
             self.fragment_size = tk.IntVar(value=1400)
 
             self.file_Packets_received = []
@@ -133,6 +133,10 @@ class ChatApp:
             self.corrupt_a_packet = True
             self.total_num_of_fragments_received =0
             tk.Label(root, text="Fragment size (bytes):").grid(row=1, column=2, padx=10, pady=5, sticky="e")
+
+            self.corrupt_button = tk.Button(root, text="Toggle Corruption", command=self.toggle_corruption)
+            self.corrupt_button.grid(row=2, column=3, padx=5, pady=10)
+
             self.fragment_entry = tk.Entry(root, textvariable=self.fragment_size, width=10)
             self.fragment_entry.grid(row=1, column=3, padx=10, pady=5, sticky="w")
 
@@ -152,6 +156,13 @@ class ChatApp:
             self.chat_window.grid(row=2, column=0, columnspan=2, padx=10, pady=10)
 
             threading.Thread(target=self.keep_alive_monitor).start()
+
+
+        def toggle_corruption(self):
+            if self.corrupt_a_packet:
+                self.corrupt_a_packet = False
+            else: self.corrupt_a_packet = True
+            print(f"Now value is {self.corrupt_a_packet}")
 
         def keep_alive_monitor(self):
             while self.is_connected:
@@ -173,7 +184,7 @@ class ChatApp:
             self.sock.sendto(keep_alive_packet.pack(), self.target_addr)
 
         def terminate_program(self):
-            print("termonating")
+            print("terminating")
             self.is_connected = False
             self.sock.close()
             self.root.destroy()
@@ -191,8 +202,8 @@ class ChatApp:
 
             try:
                 fragment_size = self.fragment_size.get() if self.fragment_entry.get() else 1400
-                if fragment_size <= 0 or fragment_size>1500:
-                    raise ValueError("Fragment size must be greater than 0 and less than 1500")
+                if fragment_size <= 0 or fragment_size>1450:
+                    raise ValueError("Fragment size must be greater than 0 and less than 1450")
             except ValueError as e:
                 messagebox.showerror("Invalid Fragment Size", str(e))
                 return
@@ -203,6 +214,7 @@ class ChatApp:
             self.chat_window.insert(tk.END, f"number of fragments to send {num_fragments}\n")
             file_name = os.path.basename(self.file_path)
             num =0
+            self.start_sending_file = time.time()
             with open(self.file_path, 'rb') as f:
                 for i in range(num_fragments):
                     fragment_data = f.read(fragment_size)
@@ -234,6 +246,7 @@ class ChatApp:
                 data=b''
             )
             self.sock.sendto(end_packet.pack(), self.target_addr)
+            self.chat_window.insert(tk.END, f"File send in {time.time()- self.start_sending_file}\n")
             self.chat_window.insert(tk.END, "File sent successfully.\n")
             self.file_path = None
 
@@ -250,25 +263,38 @@ class ChatApp:
         def send_text(self):
             message = self.message_entry.get()
 
+
             if (message):
-                packet = Packet(
-                    seq_num=Packet.generated_seq_num,
-                    header_len=1,
-                    msg_type=1,
-                    data_length=len(message),
-                    ack=0,
-                    data=message.encode()
-                )
-                self.sent_packets[packet.seq_num] = packet
-                packet_to_send = packet.pack()
-                if self.corrupt_a_packet:
-                    packet_to_send=bytearray(packet_to_send)
-                    packet_to_send[10]= 0xFF
-                    self.corrupt_a_packet = False
-                self.sock.sendto(packet_to_send, self.target_addr)
-                self.chat_window.insert(tk.END, f"Sent: {message}\n")
-                self.message_entry.delete(0, tk.END)
-                Packet.generated_seq_num += 1
+                try:
+                    fragment_size = self.fragment_size.get() if self.fragment_entry.get() else 1400
+                    if fragment_size <= 0 or fragment_size > 1450:
+                        raise ValueError("Fragment size must be greater than 0 and less than 1450")
+                except ValueError as e:
+                    messagebox.showerror("Invalid Fragment Size", str(e))
+                    return
+                num_fragments = (len(message) + fragment_size - 1) // fragment_size
+                message_bytes = message.encode()
+
+                self.chat_window.insert(tk.END, f"Sending message in {num_fragments} fragments...\n")
+                for i in range(num_fragments):
+                    fragment_data = message_bytes[i * fragment_size: (i + 1) * fragment_size]
+                    packet = Packet(
+                        seq_num=Packet.generated_seq_num,
+                        header_len=1,
+                        msg_type=1,
+                        data_length=len(fragment_data),
+                        ack=0,
+                        data=fragment_data
+                    )
+                    self.sent_packets[packet.seq_num] = packet
+                    packet_to_send = packet.pack()
+                    if self.corrupt_a_packet:
+                        packet_to_send=bytearray(packet_to_send)
+                        packet_to_send[10]= 0xFF
+                    self.sock.sendto(packet_to_send, self.target_addr)
+                    self.chat_window.insert(tk.END, f"Sent: {fragment_data}\n")
+                    self.message_entry.delete(0, tk.END)
+                    Packet.generated_seq_num += 1
             else:
                 print("type something to send, you cannot send nothing")
             self.last_activity_time =time.time()
